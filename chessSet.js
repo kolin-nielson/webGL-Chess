@@ -39,7 +39,7 @@ class ChessSet {
         this.blackTexture = loadTexture(gl, 'pieces/PiezasAjedrezDiffuseMarmolBlackBrighter.png', [80, 80, 80, 255], anisoExt, maxAnisotropy);
         this.whiteTexture = loadTexture(gl, 'pieces/PiezasAjedrezDiffuseMarmol.png', [220, 220, 220, 255], anisoExt, maxAnisotropy);
         this.boardTexture = loadTexture(gl, 'pieces/TableroDiffuse01.png', [255, 171, 0, 255], anisoExt, maxAnisotropy);
-        
+
         // Base texture doesn't need anisotropic filtering (it's 1x1)
         this.baseTexture = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, this.baseTexture);
@@ -120,13 +120,13 @@ class ChessSet {
             piece.hasMoved = true;
         }
 
-        // --- Handle En Passant Capture --- 
+        // --- Handle En Passant Capture ---
         if (piece.type === 'pawn' && targetPiece === null) { // targetPiece is null here
             const colDiffEP = Math.abs(targetCol - startCol);
             if (colDiffEP === 1) { // Check if it looks like en passant geometry
                  // Need to check if this move was validated specifically as en passant
                  // For now, assume validation was correct and find the actual captured pawn
-                 const capturedPawnRow = startRow; 
+                 const capturedPawnRow = startRow;
                  const capturedPawnCol = targetCol;
                  const capturedPawn = this.getPieceAt(capturedPawnRow, capturedPawnCol);
                  if (capturedPawn && capturedPawn.type === 'pawn' && capturedPawn.color !== piece.color) {
@@ -141,13 +141,13 @@ class ChessSet {
             }
         }
 
-        // --- Handle Castling Rook Move --- 
+        // --- Handle Castling Rook Move ---
         if (piece.type === 'king') {
             const colDiff = targetCol - startCol;
             if (Math.abs(colDiff) === 2) {
                 isCastle = true; // Set castling flag
                 const rookStartCol = (colDiff > 0) ? 7 : 0;
-                const rookEndCol = (colDiff > 0) ? 5 : 3;  
+                const rookEndCol = (colDiff > 0) ? 5 : 3;
                 const rook = this.getPieceAt(startRow, rookStartCol);
                 if (rook && rook.type === 'rook' && rook.color === piece.color) {
                     console.log(`Castling: Moving rook from [${startRow}, ${rookStartCol}] to [${startRow}, ${rookEndCol}]`);
@@ -187,14 +187,27 @@ class ChessSet {
         return true;
     }
 
+    // Cache for uniform locations to avoid redundant lookups
+    _uniformCache = {};
+
+    // Get uniform locations with caching
+    getUniformLocation(gl, shaderProgram, name) {
+        const cacheKey = `${shaderProgram}-${name}`;
+        if (!this._uniformCache[cacheKey]) {
+            this._uniformCache[cacheKey] = gl.getUniformLocation(shaderProgram, name);
+        }
+        return this._uniformCache[cacheKey];
+    }
+
     // Updated draw method - accepts full animation state
-    draw(gl, shaderProgram, viewMatrix, projectionMatrix, animationState = null, validMoveTargets = []) { 
-        const modelViewMatrixUniformLocation = gl.getUniformLocation(shaderProgram, "uModelViewMatrix");
-        const normalMatrixUniformLocation = gl.getUniformLocation(shaderProgram, "uNormalMatrix");
-        const projectionMatrixUniformLocation = gl.getUniformLocation(shaderProgram, "uProjectionMatrix");
-        const currentPieceIdUniformLocation = gl.getUniformLocation(shaderProgram, "uSelectedId");
-        const useTextureUniformLocation = gl.getUniformLocation(shaderProgram, "uUseTexture");
-        const baseColorUniformLocation = gl.getUniformLocation(shaderProgram, "uBaseColor"); 
+    draw(gl, shaderProgram, viewMatrix, projectionMatrix, animationState = null, validMoveTargets = []) {
+        // Get uniform locations using cache
+        const modelViewMatrixUniformLocation = this.getUniformLocation(gl, shaderProgram, "uModelViewMatrix");
+        const normalMatrixUniformLocation = this.getUniformLocation(gl, shaderProgram, "uNormalMatrix");
+        const projectionMatrixUniformLocation = this.getUniformLocation(gl, shaderProgram, "uProjectionMatrix");
+        const currentPieceIdUniformLocation = this.getUniformLocation(gl, shaderProgram, "uSelectedId");
+        const useTextureUniformLocation = this.getUniformLocation(gl, shaderProgram, "uUseTexture");
+        const baseColorUniformLocation = this.getUniformLocation(gl, shaderProgram, "uBaseColor");
 
         gl.uniformMatrix4fv(projectionMatrixUniformLocation, false, projectionMatrix);
 
@@ -218,8 +231,8 @@ class ChessSet {
              if (useTextureUniformLocation) gl.uniform1i(useTextureUniformLocation, 1); // Use texture
 
              gl.bindTexture(gl.TEXTURE_2D, this.baseTexture); // Use base texture
-             gl.bindBuffer(gl.ARRAY_BUFFER, boardBuffer); 
-             setShaderAttributes(gl, shaderProgram); 
+             gl.bindBuffer(gl.ARRAY_BUFFER, boardBuffer);
+             setShaderAttributes(gl, shaderProgram);
              gl.drawArrays(gl.TRIANGLES, 0, boardBuffer.vertexCount);
         }
 
@@ -249,41 +262,73 @@ class ChessSet {
             gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); // Restore blending function
             if (useTextureUniformLocation) gl.uniform1i(useTextureUniformLocation, 0); // Use base color
             // Restore desired highlight color
-            if (baseColorUniformLocation) gl.uniform4f(baseColorUniformLocation, 0.8, 0.8, 0.3, 0.6); 
+            if (baseColorUniformLocation) gl.uniform4f(baseColorUniformLocation, 0.8, 0.8, 0.3, 0.6);
             gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightBuffer);
             // Use standard attribute setup now that buffer has all data
-            setShaderAttributes(gl, shaderProgram); 
+            setShaderAttributes(gl, shaderProgram);
 
+            // Set piece ID for highlights once
+            if (currentPieceIdUniformLocation) gl.uniform1i(currentPieceIdUniformLocation, -1);
+
+            // Pre-allocate matrices to avoid creating new ones in the loop
+            const highlightMatrix = mat4.create();
+            const highlightViewMatrix = mat4.create();
+            const highlightNormalMatrix = mat3.create();
+
+            // Batch render all highlights
             for (const target of validMoveTargets) {
                 const x = (target.col - this.boardCenterOffset) * this.boardScale;
                 const y = 0.01; // Keep small Y offset
                 const z = (target.row - this.boardCenterOffset) * this.boardScale;
-                console.log(`Drawing highlight at [${target.row}, ${target.col}] (World: ${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
-                mat4.identity(modelMatrix);
-                mat4.translate(modelMatrix, modelMatrix, [x, y, z]);
-                mat4.multiply(modelViewMatrix, viewMatrix, modelMatrix);
+                mat4.identity(highlightMatrix);
+                mat4.translate(highlightMatrix, highlightMatrix, [x, y, z]);
+                mat4.multiply(highlightViewMatrix, viewMatrix, highlightMatrix);
                 // Set normal matrix even though highlights don't use it, shader expects it
-                mat3.normalFromMat4(normalMatrix, modelViewMatrix);
-                gl.uniformMatrix3fv(normalMatrixUniformLocation, false, normalMatrix);
-                gl.uniformMatrix4fv(modelViewMatrixUniformLocation, false, modelViewMatrix);
-                if (currentPieceIdUniformLocation) gl.uniform1i(currentPieceIdUniformLocation, -1); 
+                mat3.normalFromMat4(highlightNormalMatrix, highlightViewMatrix);
+                gl.uniformMatrix3fv(normalMatrixUniformLocation, false, highlightNormalMatrix);
+                gl.uniformMatrix4fv(modelViewMatrixUniformLocation, false, highlightViewMatrix);
                 gl.drawArrays(gl.TRIANGLES, 0, this.highlightBuffer.vertexCount);
             }
-            gl.disable(gl.BLEND); 
-            if (useTextureUniformLocation) gl.uniform1i(useTextureUniformLocation, 1); 
+            gl.disable(gl.BLEND);
+            if (useTextureUniformLocation) gl.uniform1i(useTextureUniformLocation, 1);
         }
 
         // --- Draw Pieces ---
-        setShaderAttributes(gl, shaderProgram); 
-        if (useTextureUniformLocation) gl.uniform1i(useTextureUniformLocation, 1); 
-        for (const piece of this.boardState) {
-             const buffer = this.buffers[piece.type];
-             if (!buffer || !buffer.vertexCount) continue;
+        setShaderAttributes(gl, shaderProgram);
+        if (useTextureUniformLocation) gl.uniform1i(useTextureUniformLocation, 1);
 
-             // Determine piece's current world position
-             mat4.identity(modelMatrix);
-             let pieceTranslation = vec3.create();
-             
+        // Pre-allocate vectors and matrices for piece rendering
+        const pieceTranslation = vec3.create();
+        const pieceMatrix = mat4.create();
+        const pieceViewMatrix = mat4.create();
+        const pieceNormalMatrix = mat3.create();
+
+        // Group pieces by type to minimize buffer and texture binding changes
+        const piecesByType = {};
+
+        // First, group pieces by type
+        for (const piece of this.boardState) {
+            if (!piecesByType[piece.type]) {
+                piecesByType[piece.type] = [];
+            }
+            piecesByType[piece.type].push(piece);
+        }
+
+        // Then render pieces by type
+        for (const pieceType in piecesByType) {
+            const buffer = this.buffers[pieceType];
+            if (!buffer || !buffer.vertexCount) continue;
+
+            // Bind buffer once per piece type
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            setShaderAttributes(gl, shaderProgram);
+            // Note: We'll bind the appropriate texture (white/black) for each piece individually
+
+            // Render all pieces of this type
+            for (const piece of piecesByType[pieceType]) {
+                // Determine piece's current world position
+                mat4.identity(pieceMatrix);
+
              // Is this piece the captured piece being animated?
              if (animationState?.isCaptureAnimating && piece.id === animationState.capturedPieceId) {
                   vec3.copy(pieceTranslation, animationState.capturedPiecePosition);
@@ -298,24 +343,23 @@ class ChessSet {
                  vec3.set(pieceTranslation, x, y, z);
              }
 
-             // Apply translation and other transformations
-             mat4.translate(modelMatrix, modelMatrix, pieceTranslation);
-             // TODO: Add rotation or scaling if needed
+                // Apply translation and other transformations
+                mat4.translate(pieceMatrix, pieceMatrix, pieceTranslation);
+                // TODO: Add rotation or scaling if needed
 
-             // Calculate matrices and set uniforms
-             mat4.multiply(modelViewMatrix, viewMatrix, modelMatrix);
-             mat3.normalFromMat4(normalMatrix, modelViewMatrix);
-             gl.uniformMatrix4fv(modelViewMatrixUniformLocation, false, modelViewMatrix);
-             gl.uniformMatrix3fv(normalMatrixUniformLocation, false, normalMatrix);
-             if (currentPieceIdUniformLocation) gl.uniform1i(currentPieceIdUniformLocation, piece.id);
-             
-             // Set texture
-             gl.bindTexture(gl.TEXTURE_2D, piece.color === 'white' ? this.whiteTexture : this.blackTexture);
-             
-             // Bind buffer and draw
-             gl.bindBuffer(gl.ARRAY_BUFFER, buffer); 
-             setShaderAttributes(gl, shaderProgram); // Set attributes for THIS buffer
-             gl.drawArrays(gl.TRIANGLES, 0, buffer.vertexCount);
+                // Calculate matrices and set uniforms
+                mat4.multiply(pieceViewMatrix, viewMatrix, pieceMatrix);
+                mat3.normalFromMat4(pieceNormalMatrix, pieceViewMatrix);
+                gl.uniformMatrix4fv(modelViewMatrixUniformLocation, false, pieceViewMatrix);
+                gl.uniformMatrix3fv(normalMatrixUniformLocation, false, pieceNormalMatrix);
+                if (currentPieceIdUniformLocation) gl.uniform1i(currentPieceIdUniformLocation, piece.id);
+
+                // Set texture for piece color (white or black)
+                gl.bindTexture(gl.TEXTURE_2D, piece.color === 'white' ? this.whiteTexture : this.blackTexture);
+
+                // Draw the piece (buffer already bound)
+                gl.drawArrays(gl.TRIANGLES, 0, buffer.vertexCount);
+            }
         }
     }
 
@@ -354,7 +398,7 @@ class ChessSet {
             gl.uniform4f(pickColorUniformLocation, r, g, b, 1.0);
 
             gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-            setPickingShaderAttributes(gl, pickingProgramInfo); 
+            setPickingShaderAttributes(gl, pickingProgramInfo);
             gl.drawArrays(gl.TRIANGLES, 0, buffer.vertexCount);
         }
     }

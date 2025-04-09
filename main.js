@@ -4,6 +4,8 @@ import { ChessSet } from "./chessSet.js";
 import { intersectRayPlane, screenToWorldRay, worldToBoardCoords } from './mathUtils.js';
 // Import validation and helper, including game status check
 import { isValidMove, getValidMoves, getGameStatus, isSquareAttacked } from './chessRules.js';
+// Import UI functionality
+import { initUI, addCapturedPiece, updateTurnIndicator, updateStatusDisplay, showGameOverOverlay, updateFPS } from './ui.js';
 // Import skybox helpers (REMOVED)
 // import { createSkyboxBuffer, loadCubemapTexture } from './helpers.js';
 
@@ -21,7 +23,7 @@ function boardToWorldCoords(row, col, boardScale, boardCenterOffset) {
 	const x = (col - boardCenterOffset) * boardScale;
 	const z = (row - boardCenterOffset) * boardScale;
 	// Use glMatrix.vec3 directly
-	return glMatrix.vec3.fromValues(x, 0, z); 
+	return glMatrix.vec3.fromValues(x, 0, z);
 }
 
 // --- Global Constants ---
@@ -52,20 +54,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 	console.log('This is working');
 
-	// Get UI elements (Removed resetButton)
-	const turnDisplay = document.getElementById('turn-display');
-	const statusDisplay = document.getElementById('status-display');
+	// Initialize UI
+	initUI();
 
 	//
 	// start gl
-	// 
+	//
 	const canvas = document.getElementById('glcanvas');
 	const gl = canvas.getContext('webgl');
 	if (!gl) {
 		alert('Your browser does not support WebGL');
 	}
 
-	// --- Get Anisotropic Filtering Extension --- 
+	// --- Get Anisotropic Filtering Extension ---
 	const anisoExt = (
 		gl.getExtension('EXT_texture_filter_anisotropic') ||
 		gl.getExtension('MOZ_EXT_texture_filter_anisotropic') ||
@@ -93,14 +94,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 	let isGameOver = false;
 	let gameStatusMessage = "Playing";
 	let lastMove = null; // Store info like { pieceId, startRow, startCol, endRow, endCol, pieceType, isDoublePawnPush }
+	let isFirstTurn = true; // Flag to track if this is the first turn of the game
 
-	// --- Animation State --- 
+	// --- Animation State ---
 	let animationState = {
 		// Regular Move
 		isAnimating: false,
 		pieceId: null,
 		startPosition: glMatrix.vec3.create(),
 		endPosition: glMatrix.vec3.create(),
+		currentPosition: glMatrix.vec3.create(), // Add this to fix TypeScript warnings
 		startTime: 0,
 		// duration will be set dynamically
 		targetRow: 0,
@@ -111,20 +114,34 @@ document.addEventListener('DOMContentLoaded', async () => {
 		stompCount: 0,
 		maxStomps: 3,
 		// stompDuration will be set dynamically
-		stompHeight: 1.2, 
+		stompHeight: 1.2,
 		capturedPieceId: null,
-		captureStartTime: 0, 
-		capturedPiecePosition: glMatrix.vec3.create(), 
-		capturedPieceYAtStompStart: 0.0, 
-		duration: 0, 
+		captureStartTime: 0,
+		capturedPiecePosition: glMatrix.vec3.create(),
+		capturedPieceYAtStompStart: 0.0,
+		duration: 0,
 		// NEW dynamic height properties
 		capturedPieceActualHeight: pieceBaseHeight, // Default
 		dynamicSinkDepthPerStomp: (-pieceBaseHeight / 3) // Default
 	};
+
+	// --- Camera Animation State ---
+	let cameraAnimationState = {
+		isAnimating: false,
+		startPosition: glMatrix.vec3.create(),
+		endPosition: glMatrix.vec3.create(),
+		startTime: 0,
+		duration: 0,
+		startAngle: 0,  // Starting angle in radians
+		endAngle: 0,    // Ending angle in radians
+		radius: 0       // Distance from center
+	};
+
 	const standardMoveDuration = 0.4;
-	const captureJumpDuration = 1.0; 
-	const captureStompDuration = 1.0; 
+	const captureJumpDuration = 1.0;
+	const captureStompDuration = 1.0;
 	const captureJumpHeight = 0.8;
+	const cameraTurnDuration = 1.2; // Duration for camera animation when turn changes (half rotation)
 
 	//
 	// Setup keyboard events:
@@ -139,7 +156,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 	//
 	// Create MAIN shader program
-	// 
+	//
 	const shaderProgram = initShaderProgram(gl, await (await fetch("textureNormalTriangles.vs")).text(), await (await fetch("textureNormalTriangles.fs")).text());
 	if (!shaderProgram) {
 		alert("Failed to initialize the main shader program. Check console for errors.");
@@ -224,7 +241,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 	const at = [0, 0, 0]; // Look at the center of the board
 	const up = [0, 1, 0];
 	// Current eye will be updated based on currentPlayer
-	let currentEye = whiteCameraEye;
+	// Create a new vec3 for currentEye so it's not a reference to whiteCameraEye or blackCameraEye
+	let currentEye = glMatrix.vec3.clone(whiteCameraEye);
 
 	//
 	// Create content to display
@@ -304,6 +322,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 	// --- Function to Reset Game State Completely (REMOVED) ---
 	// ... resetGame function removed ...
 
+
+
 	// --- Function to Update Game Status and UI ---
 	function updateGameStatus() {
 		const status = getGameStatus(currentPlayer, chessSet.boardState, chessSet.getPieceAt.bind(chessSet), lastMove);
@@ -332,169 +352,191 @@ document.addEventListener('DOMContentLoaded', async () => {
 				break;
 		}
 
-		if (turnDisplay) {
-			turnDisplay.textContent = `Turn: ${currentPlayer.charAt(0).toUpperCase() + currentPlayer.slice(1)}`;
-		}
-		if (statusDisplay) {
-			statusDisplay.textContent = `Status: ${gameStatusMessage}`;
+		// Update UI elements
+		updateTurnIndicator(currentPlayer);
+		updateStatusDisplay(status, gameStatusMessage);
+
+		// Start camera animation to the new player's perspective
+		const targetEye = (currentPlayer === 'white') ? whiteCameraEye : blackCameraEye;
+
+		// Only start camera animation if it's not the first turn of the game
+		if (!isFirstTurn) {
+			// Setup circular camera animation
+			cameraAnimationState.isAnimating = true;
+
+			// Store start and end positions for reference
+			glMatrix.vec3.copy(cameraAnimationState.startPosition, currentEye);
+			glMatrix.vec3.copy(cameraAnimationState.endPosition, targetEye);
+
+			// Calculate radius (distance from center to camera)
+			// We'll use the XZ plane distance since Y remains constant
+			const dx = currentEye[0] - at[0];
+			const dz = currentEye[2] - at[2];
+			cameraAnimationState.radius = Math.sqrt(dx * dx + dz * dz);
+
+			// Calculate start angle (in radians)
+			cameraAnimationState.startAngle = Math.atan2(currentEye[2] - at[2], currentEye[0] - at[0]);
+
+			// Calculate end angle (in radians)
+			cameraAnimationState.endAngle = Math.atan2(targetEye[2] - at[2], targetEye[0] - at[0]);
+
+			// Make the camera rotate a half circle (180 degrees) to the opposite side
+			// Add π radians (180 degrees) to create a half rotation
+			cameraAnimationState.endAngle = cameraAnimationState.startAngle + Math.PI;
+
+			// No need to normalize angles for a half rotation
+
+			cameraAnimationState.startTime = performance.now() / 1000.0;
+			cameraAnimationState.duration = cameraTurnDuration;
+			// Removed console.log for performance
+		} else {
+			// If it's the first turn, just set the camera position directly without animation
+			glMatrix.vec3.copy(currentEye, targetEye);
+			console.log('First turn - setting camera position without animation');
+			// Mark that we're no longer on the first turn
+			isFirstTurn = false;
 		}
 
-		// Update camera position based on the NEW current player
-		currentEye = (currentPlayer === 'white') ? whiteCameraEye : blackCameraEye;
-
+		// Show game over overlay if game is over
 		if (isGameOver) {
 			console.log("Game Over: ", gameStatusMessage);
-			// Optionally show a more prominent game over message/overlay
+			showGameOverOverlay(gameStatusMessage);
 		}
 	}
 
 	// --- Mouse Click Listener Function ---
 	function handleMouseClick(event) {
 		// Ignore clicks during ANY animation OR if game is over
-		if (animationState.isAnimating || animationState.isCaptureAnimating || isGameOver) return; 
+		if (animationState.isAnimating || animationState.isCaptureAnimating || cameraAnimationState.isAnimating || isGameOver) return;
 
 		const rect = canvas.getBoundingClientRect();
 		const mouseX = event.clientX - rect.left;
 		const mouseY = event.clientY - rect.top;
 
-		if (selectedPieceId !== null) {
-			// --- Attempting Move Target Selection ---
-			const pieceToMove = chessSet.getPieceById(selectedPieceId);
-			if (!pieceToMove) { // Safety check
-				selectedPieceId = null;
-				validMoveTargets = [];
-				return;
-			}
+		// First, perform ray casting to determine what was clicked
+		const viewMatrix = glMatrix.mat4.create();
+		glMatrix.mat4.lookAt(viewMatrix, currentEye, at, up);
+		const ray = screenToWorldRay(mouseX, mouseY, canvas.clientWidth, canvas.clientHeight, viewMatrix, projectionMatrix);
+		if (!ray) return;
+		const intersection = intersectRayPlane(ray.origin, ray.direction, boardPlanePoint, boardPlaneNormal);
 
-			// Need view matrix for raycasting
-			const viewMatrix = glMatrix.mat4.create();
-			glMatrix.mat4.lookAt(viewMatrix, currentEye, at, up);
-			const ray = screenToWorldRay(mouseX, mouseY, canvas.clientWidth, canvas.clientHeight, viewMatrix, projectionMatrix);
-			if (!ray) return;
-			const intersection = intersectRayPlane(ray.origin, ray.direction, boardPlanePoint, boardPlaneNormal);
+		if (intersection) {
+			const targetCoords = worldToBoardCoords(intersection[0], intersection[2], chessSet.boardScale, chessSet.boardCenterOffset);
 
-			if (intersection) {
-				const targetCoords = worldToBoardCoords(intersection[0], intersection[2], chessSet.boardScale, chessSet.boardCenterOffset);
-
-				if (targetCoords) {
-					if (pieceToMove.row === targetCoords.row && pieceToMove.col === targetCoords.col) {
+			if (targetCoords) {
+				// Check if we have a selected piece
+				if (selectedPieceId !== null) {
+					const pieceToMove = chessSet.getPieceById(selectedPieceId);
+					if (!pieceToMove) { // Safety check
 						selectedPieceId = null;
 						validMoveTargets = [];
-					} else {
-						// Check if the clicked target square is in the list of valid moves
-						const isTargetValid = validMoveTargets.some(move => move.row === targetCoords.row && move.col === targetCoords.col);
-
-						if (isTargetValid) {
-							// --- Check if it's a capture before starting animation ---
-							const potentialTargetPiece = chessSet.getPieceAt(targetCoords.row, targetCoords.col);
-							const isEnPassant = (pieceToMove.type === 'pawn' && !potentialTargetPiece && Math.abs(targetCoords.col - pieceToMove.col) === 1);
-							
-							if (potentialTargetPiece && potentialTargetPiece.color !== pieceToMove.color || isEnPassant) {
-								// --- Start Capture Animation Sequence ---
-								console.log(`Starting CAPTURE animation for piece ${selectedPieceId} to [${targetCoords.row}, ${targetCoords.col}]`);
-								
-								// Find the actual captured piece ID and its height
-								let capturedPiece = potentialTargetPiece;
-								if (isEnPassant) {
-									capturedPiece = chessSet.getPieceAt(pieceToMove.row, targetCoords.col); 
-								}
-								if (!capturedPiece) {
-									console.error("Capture animation started but couldn't identify captured piece!");
-									return; // Abort if no captured piece found
-								}
-
-								// Set animation state
-								animationState.isCaptureAnimating = true;
-								animationState.capturePhase = 1; // Start with jump arc
-								animationState.pieceId = selectedPieceId; // Attacker
-								animationState.targetRow = targetCoords.row;
-								animationState.targetCol = targetCoords.col;
-								animationState.startPosition = boardToWorldCoords(pieceToMove.row, pieceToMove.col, chessSet.boardScale, chessSet.boardCenterOffset);
-								animationState.endPosition = boardToWorldCoords(targetCoords.row, targetCoords.col, chessSet.boardScale, chessSet.boardCenterOffset);
-								animationState.capturedPieceId = capturedPiece.id;
-								
-								// Store actual height and calculate dynamic sinking
-								animationState.capturedPieceActualHeight = PIECE_TYPE_HEIGHTS[capturedPiece.type] || pieceBaseHeight; // Use map or default
-								const dynamicTotalSinkDepth = -animationState.capturedPieceActualHeight;
-								animationState.dynamicSinkDepthPerStomp = dynamicTotalSinkDepth / animationState.maxStomps;
-								
-								animationState.stompCount = 0;
-								animationState.captureStartTime = performance.now() / 1000.0;
-								animationState.duration = captureJumpDuration; // Use jump duration
-								animationState.capturedPieceYAtStompStart = 0.0; 
-
-							} else {
-								// --- Start Regular Move Animation ---
-								console.log(`Starting REGULAR animation for piece ${selectedPieceId} to [${targetCoords.row}, ${targetCoords.col}]`);
-								animationState.isAnimating = true;
-								animationState.pieceId = selectedPieceId;
-								animationState.targetRow = targetCoords.row;
-								animationState.targetCol = targetCoords.col;
-								animationState.startPosition = boardToWorldCoords(pieceToMove.row, pieceToMove.col, chessSet.boardScale, chessSet.boardCenterOffset);
-								animationState.endPosition = boardToWorldCoords(targetCoords.row, targetCoords.col, chessSet.boardScale, chessSet.boardCenterOffset);
-								animationState.startTime = performance.now() / 1000.0;
-								animationState.duration = standardMoveDuration; // Use standard duration
-							}
-							selectedPieceId = null; 
-							validMoveTargets = []; 
-						} // End isTargetValid check
+						return;
 					}
+
+					// Check if the clicked square is a valid move target
+					const isTargetValid = validMoveTargets.some(move => move.row === targetCoords.row && move.col === targetCoords.col);
+
+					if (isTargetValid) {
+						// --- Check if it's a capture before starting animation ---
+						const potentialTargetPiece = chessSet.getPieceAt(targetCoords.row, targetCoords.col);
+						const isEnPassant = (pieceToMove.type === 'pawn' && !potentialTargetPiece && Math.abs(targetCoords.col - pieceToMove.col) === 1);
+
+						if (potentialTargetPiece && potentialTargetPiece.color !== pieceToMove.color || isEnPassant) {
+							// --- Start Capture Animation Sequence ---
+							console.log(`Starting CAPTURE animation for piece ${selectedPieceId} to [${targetCoords.row}, ${targetCoords.col}]`);
+
+							// Find the actual captured piece ID and its height
+							let capturedPiece = potentialTargetPiece;
+							if (isEnPassant) {
+								capturedPiece = chessSet.getPieceAt(pieceToMove.row, targetCoords.col);
+							}
+							if (!capturedPiece) {
+								console.error("Capture animation started but couldn't identify captured piece!");
+								return; // Abort if no captured piece found
+							}
+
+							// Set animation state
+							animationState.isCaptureAnimating = true;
+							animationState.capturePhase = 1; // Start with jump arc
+							animationState.pieceId = selectedPieceId; // Attacker
+							animationState.targetRow = targetCoords.row;
+							animationState.targetCol = targetCoords.col;
+							animationState.startPosition = boardToWorldCoords(pieceToMove.row, pieceToMove.col, chessSet.boardScale, chessSet.boardCenterOffset);
+							animationState.endPosition = boardToWorldCoords(targetCoords.row, targetCoords.col, chessSet.boardScale, chessSet.boardCenterOffset);
+							animationState.capturedPieceId = capturedPiece.id;
+
+							// Store actual height and calculate dynamic sinking
+							animationState.capturedPieceActualHeight = PIECE_TYPE_HEIGHTS[capturedPiece.type] || pieceBaseHeight; // Use map or default
+							const dynamicTotalSinkDepth = -animationState.capturedPieceActualHeight;
+							animationState.dynamicSinkDepthPerStomp = dynamicTotalSinkDepth / animationState.maxStomps;
+
+							animationState.stompCount = 0;
+							animationState.captureStartTime = performance.now() / 1000.0;
+							animationState.duration = captureJumpDuration; // Use jump duration
+							animationState.capturedPieceYAtStompStart = 0.0;
+
+						} else {
+							// --- Start Regular Move Animation ---
+							console.log(`Starting REGULAR animation for piece ${selectedPieceId} to [${targetCoords.row}, ${targetCoords.col}]`);
+							animationState.isAnimating = true;
+							animationState.pieceId = selectedPieceId;
+							animationState.targetRow = targetCoords.row;
+							animationState.targetCol = targetCoords.col;
+							animationState.startPosition = boardToWorldCoords(pieceToMove.row, pieceToMove.col, chessSet.boardScale, chessSet.boardCenterOffset);
+							animationState.endPosition = boardToWorldCoords(targetCoords.row, targetCoords.col, chessSet.boardScale, chessSet.boardCenterOffset);
+							animationState.startTime = performance.now() / 1000.0;
+							animationState.duration = standardMoveDuration; // Use standard duration
+						}
+						selectedPieceId = null;
+						validMoveTargets = [];
+						return; // Exit after starting move animation
+					}
+				}
+
+				// If we reach here, either:
+				// 1. No piece was selected and we clicked on a board square
+				// 2. A piece was selected but we clicked on an invalid move target
+				// In either case, check if there's a piece at the clicked location
+				const clickedPiece = chessSet.getPieceAt(targetCoords.row, targetCoords.col);
+
+				if (clickedPiece && clickedPiece.color === currentPlayer) {
+					// Select this piece
+					selectedPieceId = clickedPiece.id;
+					validMoveTargets = getValidMoves(clickedPiece, chessSet.boardState, chessSet.getPieceAt.bind(chessSet), lastMove);
+					console.log(`Selected piece ${selectedPieceId} (${clickedPiece.type}) with ${validMoveTargets.length} valid moves`);
 				} else {
+					// Clicked on empty square or opponent's piece - deselect
 					selectedPieceId = null;
 					validMoveTargets = [];
 				}
 			} else {
+				// Clicked outside the board
 				selectedPieceId = null;
 				validMoveTargets = [];
 			}
 		} else {
-			// --- Attempting Piece Selection ---
-			const webglPixelX = mouseX * gl.canvas.width / canvas.clientWidth;
-			const webglPixelY = gl.canvas.height - mouseY * gl.canvas.height / canvas.clientHeight - 1;
-
-			// Picking Render Pass
-			gl.bindFramebuffer(gl.FRAMEBUFFER, pickingFBO);
-			gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-			gl.useProgram(pickingProgramInfo.program);
-			gl.clearColor(0.0, 0.0, 0.0, 0.0); // Clear picking buffer to empty (ID 0)
-			gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-			const pickViewMatrix = glMatrix.mat4.create(); // Use current camera for picking render
-			glMatrix.mat4.lookAt(pickViewMatrix, currentEye, at, up);
-			chessSet.drawForPicking(gl, pickingProgramInfo, pickViewMatrix, projectionMatrix);
-			
-			const pixelData = new Uint8Array(4);
-			gl.readPixels(
-				Math.floor(webglPixelX),
-				Math.floor(webglPixelY),
-				1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixelData
-			);
-			
-			gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-			gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-			gl.clearColor(0.75, 0.85, 0.8, 1.0); // Restore main background color
-			gl.useProgram(programInfo.program); // Switch back to main program
-
-			const clickedId = pixelData[0]; // ID from Red channel (assuming ID fits in 8 bits for simplicity)
-			// If ID > 255, you'd need to decode from pixelData[0], [1], [2] etc.
-			if (clickedId > 0) {
-				const piece = chessSet.getPieceById(clickedId);
-				if (piece && piece.color === currentPlayer) {
-					selectedPieceId = clickedId;
-					validMoveTargets = getValidMoves(piece, chessSet.boardState, chessSet.getPieceAt.bind(chessSet), lastMove);
-				} else if (piece) {
-					selectedPieceId = null; 
-					validMoveTargets = [];
-				} else {
-					selectedPieceId = null;
-					validMoveTargets = [];
-				}
-			} else {
-				selectedPieceId = null;
-				validMoveTargets = [];
-			}
+			// No intersection with board plane
+			selectedPieceId = null;
+			validMoveTargets = [];
 		}
 		// Redraw is handled by the animation loop, no need to explicitly call redraw here
 	}
+
+	// Listen for chess-game-reset event
+	document.addEventListener('chess-game-reset', function() {
+		// Reset the game state
+		chessSet.resetBoard();
+		currentPlayer = 'white';
+		selectedPieceId = null;
+		validMoveTargets = [];
+		isGameOver = false;
+		gameStatusMessage = "Playing";
+		lastMove = null;
+		isFirstTurn = true;
+
+		// Update the UI
+		updateGameStatus();
+	});
 
 	// --- Attach Event Listeners ---
 	window.addEventListener("keydown", keyDown);
@@ -505,28 +547,72 @@ document.addEventListener('DOMContentLoaded', async () => {
 	//
 	// Main render loop
 	//
-	let previousTime = 0;
+	// Variables for frame rate limiting
+	let lastFrameTime = 0;
+	const targetFPS = 60;
+	const frameInterval = 1000 / targetFPS;
+
 	function redraw(currentTime) {
-		currentTime /= 1000.0; // Convert ms to seconds
-		const deltaTime = currentTime - previousTime;
-		previousTime = currentTime;
+		// Update FPS counter
+		updateFPS(currentTime);
+
+		// Frame rate limiting
+		const elapsed = currentTime - lastFrameTime;
+		if (elapsed < frameInterval) {
+			requestAnimationFrame(redraw);
+			return; // Skip this frame
+		}
+
+		// Calculate a smoothed time delta
+		lastFrameTime = currentTime - (elapsed % frameInterval);
+
+		// Convert to seconds for animation calculations
+		currentTime /= 1000.0;
+
+		// --- Update Camera Animation --- (Only if camera is animating)
+		if (cameraAnimationState.isAnimating) {
+			const elapsedTime = currentTime - cameraAnimationState.startTime;
+			const t = smoothstep(0, cameraAnimationState.duration, elapsedTime);
+
+			// Interpolate angle for circular motion
+			const currentAngle = cameraAnimationState.startAngle + (cameraAnimationState.endAngle - cameraAnimationState.startAngle) * t;
+
+			// Calculate new camera position based on angle and radius
+			const radius = cameraAnimationState.radius;
+			currentEye[0] = at[0] + radius * Math.cos(currentAngle);
+			currentEye[2] = at[2] + radius * Math.sin(currentAngle);
+			// Y position remains constant (height above board)
+
+			// Check if animation is complete
+			if (elapsedTime >= cameraAnimationState.duration) {
+				// Ensure camera is exactly at the target position
+				glMatrix.vec3.copy(currentEye, cameraAnimationState.endPosition);
+				cameraAnimationState.isAnimating = false;
+			}
+		}
 
 		// --- Update Regular Move Animation --- (Only if isAnimating)
 		if (animationState.isAnimating) {
 			const elapsedTime = currentTime - animationState.startTime;
 			const t = smoothstep(0, animationState.duration, elapsedTime);
-			let currentPos = glMatrix.vec3.create(); 
+			let currentPos = glMatrix.vec3.create();
 			glMatrix.vec3.lerp(currentPos, animationState.startPosition, animationState.endPosition, t);
-			currentPos[1] = Math.sin(t * Math.PI) * verticalArcHeight; 
-			animationState.currentPosition = currentPos; 
+			currentPos[1] = Math.sin(t * Math.PI) * verticalArcHeight;
+			animationState.currentPosition = currentPos;
 
 			if (elapsedTime >= animationState.duration) {
-				console.log(`REGULAR Animation finished for piece ${animationState.pieceId}.`);
+				// Animation finished
 				// Update board state via movePiece (no capture data expected)
 				const moveResult = chessSet.movePiece(animationState.pieceId, animationState.targetRow, animationState.targetCol);
 				if (moveResult.success) {
+					// Check if there was a capture (en passant can cause this even in "regular" move)
+					if (moveResult.capturedPiece) {
+						// Add the captured piece to the UI
+						addCapturedPiece(moveResult.capturedPiece, currentPlayer);
+					}
+
 					currentPlayer = (currentPlayer === 'white' ? 'black' : 'white');
-					updateGameStatus(); 
+					updateGameStatus();
 					lastMove = {
 						pieceId: animationState.pieceId,
 						startRow: animationState.startPosition[2] / chessSet.boardScale + chessSet.boardCenterOffset, // Approx reverse calculation
@@ -552,13 +638,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 		if (animationState.isCaptureAnimating) {
 			const phaseElapsedTime = currentTime - animationState.captureStartTime;
 			let currentPos = glMatrix.vec3.create(); // Attacker position
-			let capturedPos = glMatrix.vec3.create(); // Captured position
 
 			if (animationState.capturePhase === 1) { // Attacker Jump Arc
 				const rawT = Math.min(1.0, phaseElapsedTime / animationState.duration);
-				glMatrix.vec3.lerp(currentPos, animationState.startPosition, animationState.endPosition, rawT); 
+				glMatrix.vec3.lerp(currentPos, animationState.startPosition, animationState.endPosition, rawT);
 				// Use DYNAMIC height for arc calculation
-				currentPos[1] = (rawT * animationState.capturedPieceActualHeight) + (Math.sin(rawT * Math.PI) * captureJumpHeight); 
+				currentPos[1] = (rawT * animationState.capturedPieceActualHeight) + (Math.sin(rawT * Math.PI) * captureJumpHeight);
 				animationState.currentPosition = currentPos;
 
 				// Keep captured piece stationary on the board (Y=0)
@@ -579,12 +664,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 					// No need to explicitly set capturedPieceYAtStompStart here, it was 0 from init
 				}
 			} else if (animationState.capturePhase === 2) { // Stomps
-				const t = Math.min(1.0, phaseElapsedTime / animationState.duration); 
+				const t = Math.min(1.0, phaseElapsedTime / animationState.duration);
 
 				// --- Captured Piece Position Calculation (Progressive Sink) ---
 				const capturedPiece = chessSet.getPieceById(animationState.capturedPieceId);
-				let capturedCurrentY = animationState.capturedPieceYAtStompStart; 
-				let baseCapturedPos = glMatrix.vec3.create(); 
+				let capturedCurrentY = animationState.capturedPieceYAtStompStart;
+				let baseCapturedPos = glMatrix.vec3.create();
 
 				if (capturedPiece) {
 					baseCapturedPos = boardToWorldCoords(capturedPiece.row, capturedPiece.col, chessSet.boardScale, chessSet.boardCenterOffset);
@@ -595,19 +680,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 					let sinkProgress = smoothstep(0, 1, t);
 					capturedCurrentY = startY + (targetY - startY) * sinkProgress;
 
-					baseCapturedPos[1] = capturedCurrentY; 
-					animationState.capturedPiecePosition = baseCapturedPos; 
+					baseCapturedPos[1] = capturedCurrentY;
+					animationState.capturedPiecePosition = baseCapturedPos;
 				}
 
 				// --- Attacker Piece Position Calculation (Dynamic Height) ---
-				glMatrix.vec3.copy(currentPos, animationState.endPosition); 
+				glMatrix.vec3.copy(currentPos, animationState.endPosition);
 
 				// Determine the base Y for the stomp - USE DYNAMIC HEIGHT
 				let stompBaseY = capturedCurrentY + animationState.capturedPieceActualHeight;
 
 				// Calculate stomp motion relative to the captured piece's top
 				// Asymmetric bounce: quick up (ease-out), slower down (ease-in)
-				const upDurationRatio = 0.4; 
+				const upDurationRatio = 0.4;
 				let bounceHeight = 0;
 				if (t < upDurationRatio) {
 					const upT = t / upDurationRatio;
@@ -618,7 +703,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 				}
 				currentPos[1] = stompBaseY + bounceHeight;
 
-				animationState.currentPosition = currentPos; 
+				animationState.currentPosition = currentPos;
 
 				if (phaseElapsedTime >= animationState.duration) { // Stomp complete
 					// Set the starting Y for the *next* stomp - USE DYNAMIC SINK DEPTH
@@ -630,21 +715,29 @@ document.addEventListener('DOMContentLoaded', async () => {
 					}
 
 					animationState.stompCount++;
-					console.log(`Stomp ${animationState.stompCount}/${animationState.maxStomps} complete. Captured Y ~ ${animationState.capturedPieceYAtStompStart.toFixed(2)}`);
+					// Stomp complete
 
 					if (animationState.stompCount >= animationState.maxStomps) {
 						// --- Stomps Finished - Finalize Capture ---
-						console.log("Capture Phase 2 (Stomps) complete. Finalizing.");
 						const moveResult = chessSet.movePiece(animationState.pieceId, animationState.targetRow, animationState.targetCol);
 						if (moveResult.success && moveResult.capturedPiece) {
 							if (moveResult.capturedPiece.id === animationState.capturedPieceId) {
-								 console.log(`Actually removing captured piece ID: ${animationState.capturedPieceId}`);
+								 // Remove captured piece
+
+								 // Add the captured piece to the UI before removing it from the board
+								 const capturedPiece = chessSet.getPieceById(animationState.capturedPieceId);
+								 if (capturedPiece) {
+									 // Add to the UI - captured by the opposite color of the piece
+									 addCapturedPiece(capturedPiece, capturedPiece.color === 'white' ? 'black' : 'white');
+								 }
+
+								 // Now remove the piece from the board
 								 chessSet.removePiece(animationState.capturedPieceId);
 							} else {
-								 console.error("Mismatch between animated captured ID and moveResult captured ID!");
+								 // Error: ID mismatch
 							}
 							currentPlayer = (currentPlayer === 'white' ? 'black' : 'white');
-							updateGameStatus(); 
+							updateGameStatus();
 							lastMove = {
 								pieceId: animationState.pieceId,
 								startRow: animationState.startPosition[2] / chessSet.boardScale + chessSet.boardCenterOffset, // Approx reverse calculation
@@ -685,11 +778,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 		// Clear the canvas before drawing
 		gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-		
+
 		// --- Draw Skybox --- (REMOVED)
 		// ... skybox drawing logic removed ...
 
-		// --- Draw Main Scene (Chess Set) --- 
+		// --- Draw Main Scene (Chess Set) ---
 		gl.useProgram(programInfo.program); // Ensure main shader is active
 		// Pass the current camera eye position to the shader
 		gl.uniform3fv(programInfo.uniformLocations.eyePosition, currentEye);
