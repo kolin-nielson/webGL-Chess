@@ -199,8 +199,35 @@ class ChessSet {
         return this._uniformCache[cacheKey];
     }
 
+    // Create VAOs for buffers to optimize attribute binding when WebGL2 is available
+    createVAOs(gl, shaderProgram) {
+        // VAO not supported in WebGL1
+        if (!gl.createVertexArray) return;
+        this.vaos = {};
+        // Create VAOs for each geometry buffer
+        for (const [name, buffer] of Object.entries(this.buffers)) {
+            if (buffer && buffer.vertexCount) {
+                const vao = gl.createVertexArray();
+                gl.bindVertexArray(vao);
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+                setShaderAttributes(gl, shaderProgram);
+                gl.bindVertexArray(null);
+                this.vaos[name] = vao;
+            }
+        }
+        // Highlight buffer VAO
+        if (this.highlightBuffer) {
+            const vao = gl.createVertexArray();
+            gl.bindVertexArray(vao);
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightBuffer);
+            setShaderAttributes(gl, shaderProgram);
+            gl.bindVertexArray(null);
+            this.vaos.highlight = vao;
+        }
+    }
+
     // Updated draw method - accepts full animation state
-    draw(gl, shaderProgram, viewMatrix, projectionMatrix, animationState = null, validMoveTargets = []) {
+    draw(gl, shaderProgram, viewMatrix, projectionMatrix, animationState = null, validMoveTargets = [], currentTime = 0) {
         // Get uniform locations using cache
         const modelViewMatrixUniformLocation = this.getUniformLocation(gl, shaderProgram, "uModelViewMatrix");
         const normalMatrixUniformLocation = this.getUniformLocation(gl, shaderProgram, "uNormalMatrix");
@@ -216,7 +243,9 @@ class ChessSet {
         const normalMatrix = mat3.create();
 
         // --- Draw Board Base First (slightly lower, scaled, different texture) ---
+        const useVAO = (gl.bindVertexArray && this.vaos);
         const boardBuffer = this.buffers["cube"];
+        const boardVAO = useVAO && this.vaos["cube"];
         if (boardBuffer && boardBuffer.vertexCount) {
              mat4.identity(modelMatrix);
              // Scale it slightly larger and move down
@@ -231,9 +260,14 @@ class ChessSet {
              if (useTextureUniformLocation) gl.uniform1i(useTextureUniformLocation, 1); // Use texture
 
              gl.bindTexture(gl.TEXTURE_2D, this.baseTexture); // Use base texture
-             gl.bindBuffer(gl.ARRAY_BUFFER, boardBuffer);
-             setShaderAttributes(gl, shaderProgram);
+             if (boardVAO) {
+                gl.bindVertexArray(boardVAO);
+             } else {
+                gl.bindBuffer(gl.ARRAY_BUFFER, boardBuffer);
+                setShaderAttributes(gl, shaderProgram);
+             }
              gl.drawArrays(gl.TRIANGLES, 0, boardBuffer.vertexCount);
+             if (boardVAO) gl.bindVertexArray(null);
         }
 
         // --- Draw Board Top ---
@@ -247,9 +281,14 @@ class ChessSet {
              if (useTextureUniformLocation) gl.uniform1i(useTextureUniformLocation, 1);
 
              gl.bindTexture(gl.TEXTURE_2D, this.boardTexture); // Board texture
-             gl.bindBuffer(gl.ARRAY_BUFFER, boardBuffer);
-        setShaderAttributes(gl, shaderProgram);
+             if (boardVAO) {
+                gl.bindVertexArray(boardVAO);
+             } else {
+                gl.bindBuffer(gl.ARRAY_BUFFER, boardBuffer);
+                setShaderAttributes(gl, shaderProgram);
+             }
              gl.drawArrays(gl.TRIANGLES, 0, boardBuffer.vertexCount);
+             if (boardVAO) gl.bindVertexArray(null);
         } else {
             console.error("Board buffer 'cube' not found or invalid!");
         }
@@ -263,9 +302,13 @@ class ChessSet {
             if (useTextureUniformLocation) gl.uniform1i(useTextureUniformLocation, 0); // Use base color
             // Restore desired highlight color
             if (baseColorUniformLocation) gl.uniform4f(baseColorUniformLocation, 0.8, 0.8, 0.3, 0.6);
-            gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightBuffer);
-            // Use standard attribute setup now that buffer has all data
-            setShaderAttributes(gl, shaderProgram);
+            const highlightVAO = useVAO && this.vaos.highlight;
+            if (highlightVAO) {
+                gl.bindVertexArray(highlightVAO);
+            } else {
+                gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightBuffer);
+                setShaderAttributes(gl, shaderProgram);
+            }
 
             // Set piece ID for highlights once
             if (currentPieceIdUniformLocation) gl.uniform1i(currentPieceIdUniformLocation, -1);
@@ -290,11 +333,11 @@ class ChessSet {
                 gl.drawArrays(gl.TRIANGLES, 0, this.highlightBuffer.vertexCount);
             }
             gl.disable(gl.BLEND);
+            if (highlightVAO) gl.bindVertexArray(null);
             if (useTextureUniformLocation) gl.uniform1i(useTextureUniformLocation, 1);
         }
 
         // --- Draw Pieces ---
-        setShaderAttributes(gl, shaderProgram);
         if (useTextureUniformLocation) gl.uniform1i(useTextureUniformLocation, 1);
 
         // Pre-allocate vectors and matrices for piece rendering
@@ -318,30 +361,33 @@ class ChessSet {
         for (const pieceType in piecesByType) {
             const buffer = this.buffers[pieceType];
             if (!buffer || !buffer.vertexCount) continue;
-
-            // Bind buffer once per piece type
-            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-            setShaderAttributes(gl, shaderProgram);
-            // Note: We'll bind the appropriate texture (white/black) for each piece individually
+            const vao = useVAO && this.vaos[pieceType];
+            if (vao) {
+                gl.bindVertexArray(vao);
+            } else {
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+                setShaderAttributes(gl, shaderProgram);
+            }
 
             // Render all pieces of this type
             for (const piece of piecesByType[pieceType]) {
                 // Determine piece's current world position
                 mat4.identity(pieceMatrix);
 
-             // Is this piece the captured piece being animated?
-             if (animationState?.isCaptureAnimating && piece.id === animationState.capturedPieceId) {
-                  vec3.copy(pieceTranslation, animationState.capturedPiecePosition);
-             // Is this piece the attacking piece being animated (move or capture)?
-             } else if (animationState && (animationState.isAnimating || animationState.isCaptureAnimating) && piece.id === animationState.pieceId) {
-                 vec3.copy(pieceTranslation, animationState.currentPosition);
-             // Otherwise, use standard board position
-             } else {
-                 const x = (piece.col - this.boardCenterOffset) * this.boardScale;
-                 const y = 0; // Standard Y position
-                 const z = (piece.row - this.boardCenterOffset) * this.boardScale;
-                 vec3.set(pieceTranslation, x, y, z);
-             }
+                // Compute piece translation
+                // Is this piece the captured piece being animated?
+                if (animationState?.isCaptureAnimating && piece.id === animationState.capturedPieceId) {
+                     vec3.copy(pieceTranslation, animationState.capturedPiecePosition);
+                // Is this piece the attacking piece being animated (move or capture)?
+                } else if (animationState && (animationState.isAnimating || animationState.isCaptureAnimating) && piece.id === animationState.pieceId) {
+                    vec3.copy(pieceTranslation, animationState.currentPosition);
+                // Otherwise, use standard board position
+                } else {
+                    const x = (piece.col - this.boardCenterOffset) * this.boardScale;
+                    const y = 0; // Standard Y position
+                    const z = (piece.row - this.boardCenterOffset) * this.boardScale;
+                    vec3.set(pieceTranslation, x, y, z);
+                }
 
                 // Apply translation and other transformations
                 mat4.translate(pieceMatrix, pieceMatrix, pieceTranslation);
@@ -357,9 +403,10 @@ class ChessSet {
                 // Set texture for piece color (white or black)
                 gl.bindTexture(gl.TEXTURE_2D, piece.color === 'white' ? this.whiteTexture : this.blackTexture);
 
-                // Draw the piece (buffer already bound)
+                // Draw the piece (VAO bound or buffer+attributes set)
                 gl.drawArrays(gl.TRIANGLES, 0, buffer.vertexCount);
             }
+            if (vao) gl.bindVertexArray(null);
         }
     }
 

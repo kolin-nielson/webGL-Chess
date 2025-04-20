@@ -6,8 +6,8 @@ import { intersectRayPlane, screenToWorldRay, worldToBoardCoords } from './mathU
 import { isValidMove, getValidMoves, getGameStatus, isSquareAttacked } from './chessRules.js';
 // Import UI functionality
 import { initUI, addCapturedPiece, updateTurnIndicator, updateStatusDisplay, showGameOverOverlay, updateFPS } from './ui.js';
-// Import skybox helpers (REMOVED)
-// import { createSkyboxBuffer, loadCubemapTexture } from './helpers.js';
+// Import skybox and helpers for optimized attribute binding
+import { createSkyboxBuffer, loadCubemapTexture, setHighlightShaderAttributes } from "./helpers.js";
 
 // Assuming glMatrix is globally available from index.html script tag
 // (Constants moved or removed)
@@ -61,9 +61,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 	// start gl
 	//
 	const canvas = document.getElementById('glcanvas');
-	const gl = canvas.getContext('webgl');
+	// Use WebGL2 if available, fallback to WebGL
+	const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
 	if (!gl) {
 		alert('Your browser does not support WebGL');
+	}
+	// Enable sRGB framebuffer for correct gamma if using WebGL2
+	if (typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext) {
+		gl.enable(gl.FRAMEBUFFER_SRGB);
 	}
 
 	// --- Get Anisotropic Filtering Extension ---
@@ -187,6 +192,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 			specularColor2: gl.getUniformLocation(shaderProgram, 'uSpecularColor2'),
 			currentPieceId: gl.getUniformLocation(shaderProgram, 'uSelectedId'),
 			actuallySelectedId: gl.getUniformLocation(shaderProgram, 'uActuallySelectedId'),
+			envIntensity: gl.getUniformLocation(shaderProgram, 'uEnvIntensity'),
 		},
 	};
 
@@ -217,6 +223,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 	gl.useProgram(programInfo.program); // Start with the main program
 	gl.activeTexture(gl.TEXTURE0);
 	gl.uniform1i(programInfo.uniformLocations.textureSampler, 0);
+	// Set default environment reflection intensity
+	gl.uniform1f(programInfo.uniformLocations.envIntensity, 0.2);
 
 	// --- Lighting Setup (Use glMatrix.vec3 directly) ---
 	const lightDirection1 = glMatrix.vec3.fromValues(0.8, -0.6, -1.0);
@@ -249,6 +257,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 	//
 	const chessSet = new ChessSet(gl);
 	await chessSet.init(gl);
+	// Create VAOs for performance if WebGL2 is available
+	if (gl.createVertexArray) {
+		chessSet.createVAOs(gl, programInfo.program);
+	}
 
 	//
 	// Load Skybox Assets (REMOVED)
@@ -790,7 +802,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 		gl.uniform1i(programInfo.uniformLocations.actuallySelectedId, highlightedPieceId);
 
 		// Draw the ChessSet (board, pieces, highlights)
-		chessSet.draw(gl, programInfo.program, viewMatrix, projectionMatrix, animationState, validMoveTargets);
+		chessSet.draw(gl, programInfo.program, viewMatrix, projectionMatrix, animationState, validMoveTargets, currentTime);
 
 		requestAnimationFrame(redraw);
 	}

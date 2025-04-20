@@ -23,6 +23,7 @@ uniform vec3 uSpecularColor2;
 // Shared Ambient
 uniform vec3 uAmbientColor;
 uniform float uShininess;
+uniform float uEnvIntensity; // Intensity of environment reflection
 
 // Uniform for selection highlighting
 // Note: In WebGL 1, varying integers are not supported, so we use a uniform.
@@ -83,7 +84,17 @@ void main() {
              litColor = mix(litColor, vec3(0.9, 0.9, 0.5), 0.2); // Mix with yellow
              litColor = mix(litColor, vec3(0.9, 0.9, 0.3), 0.4); // Mix more strongly with yellow/gold
         }
-        finalColor = vec4(clamp(litColor, 0.0, 1.0), textureColor.a);
+
+        // Environment reflection based on view and normal direction
+        vec3 reflectDir = reflect(-viewDir, normal);
+        // Simple gradient environment mapping: blue sky at top, warmer horizon
+        vec3 envColor = vec3(
+            mix(0.2, 0.8, reflectDir.y * 0.5 + 0.5),
+            mix(0.3, 0.9, reflectDir.y * 0.5 + 0.5),
+            1.0
+        );
+        vec3 blendedColor = mix(litColor, envColor, uEnvIntensity);
+        finalColor = vec4(clamp(blendedColor, 0.0, 1.0), textureColor.a);
 
     } else {
         // --- Use Base Color (Highlights) ---
