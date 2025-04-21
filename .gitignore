@@ -1,0 +1,6 @@
+node_modules/
+.DS_Store
+assets/textures/*.jpg
+assets/textures/*.png
+assets/models/*.mtl
+assets/models/*.obj 
