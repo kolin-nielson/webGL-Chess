@@ -1,8 +1,4 @@
 # WebGL Chess
-
-
-
-
 A browser-based 3D Chess game powered by WebGL2 and JavaScript, featuring interactive piece selection, smooth animations, real-time shader effects, and a seamless UI overlay.
 
 
@@ -87,12 +83,7 @@ webgl-chess/
 - Mobile/touch support with gesture controls.
 - Enhanced PBR shaders and post‑processing effects.
 
-## Contributing
-1. Fork the repo.
-2. Create a new feature branch: `git checkout -b feature/fooBar`
-3. Commit your changes: `git commit -am 'Add fooBar feature'`
-4. Push to the branch: `git push origin feature/fooBar`
-5. Open a Pull Request.
+
 
 ## License
 This project is licensed under the MIT License.  
